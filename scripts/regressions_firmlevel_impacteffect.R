@@ -1,43 +1,88 @@
+# ============================================================================
+# Ottonello, P. and T. Winberry (2020), "Financial Heterogeneity and the
+# Investment Channel of Monetary Policy", Econometrica 88(6), 2473-2502.
+#
+# Impact-effect firm-level regressions. R translation of
+# regressions_firmlevel_impacteffect.do.
+#
+# Inputs
+#   data_constructed/construct_panel_data_firm_trim.csv
+#     Trimmed firm-quarter panel written by construct_panel_data.R
+#
+# Outputs
+#   None written to disk. Tables print to the console.
+#
+# Table numbering follows the published paper, as in the do-file. Gaps are of
+# two kinds. Tables 4-6, 8 and 16-17 are not produced by this do-file in the
+# original package either. Tables 12, 13 and 19 are within its scope but are
+# dropped here under the restrictions below.
+#
+# Scope restrictions (professor-defined; full statement in the audit document)
+#   R1  Distance to default. <reason from audit document>. All d2d columns
+#       dropped: tables 3, 9, 10, 11, 14, 15, 18, 20, 21, 22, 23.
+#   R2  Greenbook forecasts and forecast revisions. <reason>. Tables 12 and 13
+#       dropped in full; table 14 loses columns 4-6.
+#   R3  Gurkaynak-Sack-Swanson target and path shocks. <reason>. Table 19
+#       dropped in full.
+#   R4  Credit ratings. <reason>, so aboveA_dummy cannot be built. Table 9
+#       loses columns 3 and 5.
+#
+# A restricted column is dropped rather than reported whenever it collapses
+# into a column already reported in the same table. Columns that remain
+# distinct specifications after restriction are retained.
+#
+# Model objects are named m<published column>_t<published table>.
+# ============================================================================
+
 library(dplyr)
 library(fixest)
-library(modelsummary)
 
-
+# ---- Estimation options ----
+# reghdfe-compatible defaults. Must run before any feols() call.
 setFixest_ssc(ssc(fixef.K = "nested"))          # reghdfe-style dof correction 
 setFixest_estimation(fixef.rm = "singleton")    # reghdfe drops singletons
 
-comp_trim= read.csv("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/construct_panel_data_firm_trim.csv")
-names(comp_trim)
+# ---- Paths ----
+# Object names match construct_panel_data.R so the two scripts stay consistent.
+dir_root        <- "."
+dir_constructed <- file.path(dir_root, "data_constructed")
+file_panel      <- file.path(dir_constructed, "construct_panel_data_firm_trim.csv")
+
+# ============================================================
+# 1  Load data
+# ============================================================
+
+comp_trim <- read.csv(file_panel)
+
+stopifnot(!any(duplicated(comp_trim[c("gvkey", "dateq")])))
 # The control vector 
 controls_firm <- c("rsales_g_std", "size_std", "sh_current_a_std")
 
-#Restricted tables
-#Distance to default: 3,9,10, 11,14,15,18, 20,21, 22,23
-#credit ratings: 9
-# Greenbook forecasts: had to omit 12,13, affected 14
-#GSS path shocks: omitted 19
+# ============================================================
+# Table 3  Heterogeneous Responses of Investment to Monetary Policy
+# ============================================================
+# Columns 1,2  replicated
+# Column 3     omitted (R1): d2d-only specification, nothing remains
+# Column 4     omitted (R1): collapses into column 2 once d2d is removed
+# Column 5     restricted (R1): d2d terms dropped, so the point estimate is not directly comparable to the published column
 
 
-# ------------------------------------------------------------
-# Restricted Table 3: leverage-only baseline
-
-m1 <- feols(
+m1_t3 <- feols(
   dlog_capital ~ lev_wins_dem_std_gdp + lev_wins_dem_std_wide + lev_wins_dem_std |
     gvkey + maj_ind^dateq + fiscal_dummy,
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
-) #Identical
+) 
 
-m2 <- feols(
+m2_t3 <- feols(
   dlog_capital ~ lev_wins_dem_std_gdp + lev_wins_dem_std_wide + lev_wins_dem_std +
     rsales_g_std + size_std + sh_current_a_std |
     gvkey + maj_ind^dateq + fiscal_dummy,
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
-)#identical
+)
 
-#dropped columns 3,4 since no d2d 
-m5 <- feols(
+m5_t3 <- feols(
   dlog_capital ~ wide + lev_wins_dem_std_gdp + lev_wins_dem_std_wide + lev_wins_dem_std +
     rsales_g_std + size_std + sh_current_a_std +
     L1_dlog_gdp + L2_dlog_gdp + L3_dlog_gdp + L4_dlog_gdp +
@@ -49,7 +94,7 @@ m5 <- feols(
 )
 # specification replicated; point estimate not directly comparable due to scoped exclusion of distance-to-default.
 etable(
-  m1, m2, m5,
+  m1_t3, m2_t3, m5_t3,
   keep_raw = c("lev_wins_dem_std_wide", "wide"),
   dict = c(
     lev_wins_dem_std_wide = "Leverage × FFR shock",
@@ -58,8 +103,12 @@ etable(
 )
 
 
-# ------------------------------------------------------------
-# Table 7:  standardized vs unstandardized leverage
+# ============================================================
+# Table 7  Empirical results, model and data
+# ============================================================
+# Columns 1,3     replicated
+# Column 2     omitted (R5): structural model column
+# Column 4     omitted (R5): structural model column
 
 m1_t7 <- feols(
   dlog_capital ~ 
@@ -91,13 +140,17 @@ etable(
     lev_wins_dem_wide = "Raw demeaned leverage × FFR shock"
   )
 )
-#COMMENT
-#the negative leverage-shock interaction is present both when leverage is standardized and when it is left in raw demeaned units. The standardized specification is easier to interpret because the coefficient corresponds to a one sd increase in demeaned leverage.
 
-# ------------------------------------------------------------
-# Table 9: Heterogeneous responses
+# ============================================================
+# Table 9  Heterogeneous responses, not demeaning financial positions
+# ============================================================
+# Columns 1,2  replicated
+# Column 3     omitted (R4): credit rating only, nothing remains
+# Column 4     omitted (R1): d2d-only specification, nothing remains
+# Column 5     omitted (R4): collapses into column 2 once the rating dummy is removed
+# Column 6     omitted (R1): collapses into column 2 once d2d is removed
+# Column 7     restricted (R1): d2d terms dropped, so the point estimate is not directly comparable to the published column
 
-# Column 1
 m1_t9 <- feols(
   dlog_capital ~
     lev_wins_nodem_std_gdp +
@@ -107,8 +160,6 @@ m1_t9 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-#Column 2
 m2_t9 <- feols(
   dlog_capital ~
     lev_wins_nodem_std_gdp +
@@ -119,10 +170,6 @@ m2_t9 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-#Columns 3,5 removed as rating data unavailable
-# Columns4,6 removed as d2d unavailable
-
-#Column 7: Match on lev side, d2d scoped out
 m7_t9 <- feols(
   dlog_capital ~
     wide +
@@ -146,14 +193,14 @@ etable(
     wide = "FFR shock"
   )
 )
-# The leverage-shock interaction stays negative and statistically significant, hence the restricted leverage result is robust to using non-demeaned leverage. This specification is less clean for within-firm interpretation because it combines within-firm changes with cross-firm leverage differences.
+# ============================================================
+# Table 10  Main results, not controlling for differences in cyclical sensitivities
+# ============================================================
+# Column 1     replicated
+# Column 2     omitted (R1): d2d-only specification, nothing remains
+# Column 3     omitted (R1): collapses into column 1 once d2d is removed
+# Column 4     restricted (R1): d2d terms dropped, so the point estimate is not directly comparable to the published column
 
-# ------------------------------------------------------------
-# Table 10R: No cyclical sensitivity controls
-
-# Restricted replication: leverage-only
-
-# Column 1: leverage interaction, with firm controls, no leverage x GDP control
 m1_t10 <- feols(
   dlog_capital ~
     lev_wins_dem_std_wide +
@@ -163,9 +210,6 @@ m1_t10 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-# columns 2,3 (d2d) scoped out
-# Column 4: aggregate controls version, no leverage x GDP control (Without d2d)
 m4_t10 <- feols(
   dlog_capital ~
     wide +
@@ -188,12 +232,13 @@ etable(
     wide = "FFR shock"
   )
 )
-# dropping the leverage × GDP control weakens the estimated leverage-shock interaction, although the coefficient remains negative.
 
-# ------------------------------------------------------------
-# Table 11R: Expansionary vs contractionary shocks
+# ============================================================
+# Table 11  Expansionary vs. Contractionary Shocks
+# ============================================================
+# Columns 1,2  replicated
+# Columns 3,4  omitted (R1): d2d-only specifications
 
-# Column 1: baseline pooled shock
 m1_t11 <- feols(
   dlog_capital ~
     lev_wins_dem_std_gdp +
@@ -204,8 +249,6 @@ m1_t11 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-# Column 2: split positive and negative shocks
 m2_t11 <- feols(
   dlog_capital ~
     lev_wins_dem_std_gdp +
@@ -217,7 +260,6 @@ m2_t11 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-# Column 3,4 (d2d) scoped
 etable(
   m1_t11, m2_t11,
   keep_raw = c(
@@ -231,15 +273,33 @@ etable(
     lev_wins_dem_std_nwide = "Leverage × negative FFR shock"
   )
 )
-#Less leveraged firms reduce investment more after unexpected monetary loosening, the tightening effect is weekly significant
-#but the evidence is weak because the expansionary coefficient is only significant at the 10% level.
+
+# ============================================================
+# Table 12  Controlling for Greenbook Forecast Revisions
+# ============================================================
+# Not estimated. Every column interacts financial position with Greenbook
+# forecast revisions (R2), which is the point of the table.
+# Columns 1, 3, 5  omitted (R2): removing the forecast revision interactions collapses each into table 3 column 2
+# Columns 2, 4, 6  omitted (R1, R2): d2d specifications, nothing remains
 
 
+# ============================================================
+# Table 13  Controlling for Greenbook Forecasts
+# ============================================================
+# Not estimated. As table 12, with forecast levels in place of revisions.
+# Columns 1, 3, 5  omitted (R2): removing the forecast interactions collapses each into table 3 column 2
+# Columns 2, 4, 6  omitted (R1, R2): d2d specifications, nothing remains
 
-#Cant do Table 12, 13 since those require Greenbook forecasts 
 
-# ------------------------------------------------------------
-# Table 14R: Post-1994 estimates
+# ============================================================
+# Table 14  Post-1994 Estimates
+# ============================================================
+# Column 1     replicated
+# Column 2     omitted (R1): d2d-only specification, nothing remains
+# Column 3     omitted (R1): collapses into column 1 once d2d is removed
+# Column 4     omitted (R2): collapses into column 1 once the Greenbook revision interactions are removed
+# Column 5     omitted (R1, R2): nothing remains
+# Column 6     omitted (R1, R2): collapses into column 1
 
 # Column 1: post-1994 leverage baseline
 m1_t14 <- feols(
@@ -262,10 +322,14 @@ etable(
     wide = "FFR shock"
   )
 )
-#the baseline estimation sample appears to be effectively post-1994 after dropping rows with missing regression variables. Therefore, applying the post-1994 restriction does not change the Table 14R estimates.
 
-# ------------------------------------------------------------
-# Table 15R: Lagged Investment]
+# ============================================================
+# Table 15  Lagged Investment
+# ============================================================
+# Column 1     replicated
+# Column 2     omitted (R1): d2d-only specification, nothing remains
+# Column 3     omitted (R1): collapses into column 1 once d2d is removed
+# Column 4     restricted (R1): d2d terms dropped, so the point estimate is not directly comparable to the published column
 
 m1_t15 <- feols(
   dlog_capital ~
@@ -278,13 +342,8 @@ m1_t15 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-#2nd and 3rd column removed
-
-#Included on leverage side d2d terms dropped; coefficient not directly comparable to paper
 m4_t15 <- feols(
   dlog_capital ~
-    wide +
     lev_wins_dem_std_gdp +
     lev_wins_dem_std_wide +
     lev_wins_dem_std +
@@ -307,10 +366,12 @@ etable(
     wide = "FFR shock"
   )
 )
-# Even after controlling for past investment growth, more leveraged firm-quarters respond more to monetary policy shocks.
 
-# ------------------------------------------------------------
-# Table 18R: Extra cyclical sensitivity controls
+# ============================================================
+# Table 18  Controlling for differences in cyclical sensitivities
+# ============================================================
+# Columns 1, 3, 5  replicated
+# Columns 2, 4, 6  omitted (R1): d2d-only specifications, nothing remains
 
 m1_t18 <- feols(
   dlog_capital ~
@@ -322,9 +383,6 @@ m1_t18 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-# Column 2 requires d2d
-
 m3_t18 <- feols(
   dlog_capital ~
     lev_wins_dem_std_gdp +
@@ -336,9 +394,6 @@ m3_t18 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-# Column 4 required d2d
-
 m5_t18 <- feols(
   dlog_capital ~
     lev_wins_dem_std_ur +
@@ -349,8 +404,6 @@ m5_t18 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-#Column 6 excluded as no d2d
 
 etable(
   m1_t18, m3_t18, m5_t18,
@@ -368,12 +421,23 @@ etable(
   )
 )
 
-#Leverage × FFR shock stays negative, hence effect is ot simply driven by leverage-specific sensitivity to GDP or CPI, however when controlling for leverage-specific unemployment sensitivity the result weakens
+# ============================================================
+# Table 19  Target vs. Path Decomposition
+# ============================================================
+# Not estimated.
+# Column 1     omitted: identical specification to table 3 column 2
+# Column 2     omitted (R3): target and path shocks unavailable
+# Column 3     omitted (R1): d2d-only specification, nothing remains
+# Column 4     omitted (R1, R3): nothing remains
 
-#Table 19 skipped entirely as no GSS target/path
-
-# ------------------------------------------------------------
-# Table 20: Alternative Time Aggregation
+# ============================================================
+# Table 20  Alternative Time Aggregation
+# ============================================================
+# Column 1     replicated
+# Column 2     omitted (R1): d2d-only specification, nothing remains
+# Column 3     omitted (R1): collapses into column 1 once d2d is removed
+# Column 4     restricted (R1): d2d terms dropped, so the point estimate is not
+#              directly comparable to the published column
 
 m1_t20 <- feols(
   dlog_capital ~
@@ -385,10 +449,6 @@ m1_t20 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-# Column 2,3 emmited as no d2d
-
-#Column 4: Included on lev side, d2d dropped
 m4_t20 <- feols(
   dlog_capital ~
     wide_sum +
@@ -412,10 +472,12 @@ etable(
     wide_sum = "FFR shock sum"
   )
 )
-#Result still statistically significant, hence the restricted leverage result is robust to the time-aggregation method used for the monetary policy shock.
 
-# ------------------------------------------------------------
-# Table 21R: Interaction with other firm-level covariates
+# ============================================================
+# Table 21  Interaction with Other Firm-Level Covariates
+# ============================================================
+# Columns 1, 3, 5, 7  replicated
+# Columns 2, 4, 6, 8  omitted (R1): d2d-only specifications, nothing remains
 
 m1_t21 <- feols(
   dlog_capital ~
@@ -486,10 +548,12 @@ etable(
     liq_wins_dem_std_wide = "Liquidity × FFR shock"
   )
 )
-# The negative leverage coefficient remains after these additional firm-level interactions are included.
 
-# ------------------------------------------------------------
-# Table 22R: Other financial-position measures
+# ============================================================
+# Table 22  Interaction with Other Measures of Financial Positions
+# ============================================================
+# Columns 1, 3, 5, 7  replicated
+# Columns 2, 4, 6, 8  omitted (R1): d2d-only specifications, nothing remains
 
 m1_t22 <- feols(
   dlog_capital ~
@@ -502,8 +566,6 @@ m1_t22 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-#Column 2 (d2d) omitted
 m3_t22 <- feols(
   dlog_capital ~
     lev_wins_dem_std_gdp +
@@ -516,8 +578,6 @@ m3_t22 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-#Column 4 (d2d) omitted
 m5_t22 <- feols(
   dlog_capital ~
     lev_wins_dem_std_gdp +
@@ -530,8 +590,6 @@ m5_t22 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-#Column 6 (d2d) omitted
 m7_t22 <- feols(
   dlog_capital ~
     lev_wins_dem_std_gdp +
@@ -544,8 +602,6 @@ m7_t22 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-#Column 6 (d2d) omitted
 etable(
   m1_t22, m3_t22, m5_t22, m7_t22,
   keep_raw = c(
@@ -563,13 +619,12 @@ etable(
     liq_wins_dem_std_wide = "Liquidity × FFR shock"
   )
 )
+# ============================================================
+# Table 23  Instrumenting Financial Position with Past Financial Position
+# ============================================================
+# Columns 1,2,3  replicated
+# Columns 4,5,6  omitted (R1): d2d instrumented specifications, nothing remains
 
-#Survives robustness check(again): firm size, cash flow, dividend-paying status, or liquidity
-
-# ------------------------------------------------------------
-# Table 23R: IV using lagged leverage
-
-# 1-quarter lag instrument
 m1_t23 <- feols(
   dlog_capital ~
     rsales_g_std + size_std + sh_current_a_std |
@@ -579,8 +634,6 @@ m1_t23 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-# 2-quarter lag instrument
 m2_t23 <- feols(
   dlog_capital ~
     rsales_g_std + size_std + sh_current_a_std |
@@ -590,8 +643,6 @@ m2_t23 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-# 4-quarter lag instrument
 m3_t23 <- feols(
   dlog_capital ~
     rsales_g_std + size_std + sh_current_a_std |
@@ -601,8 +652,6 @@ m3_t23 <- feols(
   cluster = ~ dateq + gvkey,
   data = comp_trim %>% filter(!great_recession)
 )
-
-#columns 4,5,6 excluded(d2d)
 etable(
   m1_t23, m2_t23, m3_t23,
   keep_raw = "fit_lev_wins_dem_std_wide",
@@ -610,9 +659,11 @@ etable(
     fit_lev_wins_dem_std_wide = "Leverage × FFR shock"
   )
 )
-# The IV estimates remain negative across all lag choices, with the four-quarter lag specification weakly significant.
-# ------------------------------------------------------------
-# Table 24R: Decomposition of Leverage: All columns match
+
+# ============================================================
+# Table 24  Decomposition of Leverage
+# ============================================================
+# Columns 1-7  replicated, no columns omitted
 
 m1_t24 <- feols(
   dlog_capital ~
@@ -713,7 +764,4 @@ etable(
     sh_l_wins_dem_std_wide = "Liabilities × FFR shock"
   )
 )
-
-#The monetary-policy sensitivity is closely related to debt net of cash/liquid assets, not just gross leverage.
-# The leverage effect is mainly coming from short-term debt exposure, not long-term debt as it is insignificant. If monetary policy tightens, firms with more short-term debt may face quicker increases in borrowing costs, also insignificant for total liabilities
 

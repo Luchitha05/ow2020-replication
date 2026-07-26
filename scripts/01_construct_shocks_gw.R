@@ -1,18 +1,49 @@
-library(tidyverse)
-library(readxl)
-library(lubridate)
-library(zoo)
+# ============================================================
+# Ottonello & Winberry (2020), "Financial Heterogeneity and the Investment
+# Channel of Monetary Policy", Econometrica
+#
+# Builds the GW wide-window monetary policy surprise series: reads the
+# event-level surprises, rescales them to decimals, and aggregates them to
+# quarterly frequency both unweighted and with the within-quarter timing
+# weights used in the paper.
+#
+# Inputs
+#   data_raw/replication_dataset_gw.xlsx           sheet 2, event-level surprises
+#
+# Outputs
+#   data_constructed/construct_shocks_daily.csv    event-level series
+#   data_constructed/construct_shocks_quarterly.csv
+#
+# Section numbers follow the Stata do-file. This script defines no helper
+# functions, so that section is absent.
+# ============================================================
 
-# ------------------------------------------------------------
-# 1. Read the GW replication Excel sheet
-# ------------------------------------------------------------
+library(tidyverse)  # dplyr, readr
+library(readxl)     # read_excel
+library(lubridate)  # days
+library(zoo)        # as.yearqtr
 
-gw_raw <- read_excel("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_raw/replication_dataset_gw.xlsx", sheet = 2)
 
-# ------------------------------------------------------------
-# 2. Keep only the FOMC date and wide monetary surprise
-# ------------------------------------------------------------
+# ============================================================
+# Paths
+# ============================================================
 
+dir_root <- "."
+dir_raw         <- file.path(dir_root, "data_raw")
+dir_constructed <- file.path(dir_root, "data_constructed")
+
+# Raw input
+file_gw_xlsx <- file.path(dir_raw, "replication_dataset_gw.xlsx")
+
+# Outputs
+file_shocks_daily     <- file.path(dir_constructed, "construct_shocks_daily.csv")
+file_shocks_quarterly <- file.path(dir_constructed, "construct_shocks_quarterly.csv")
+
+
+# Read the GW replication file
+gw_raw <- read_excel(file_gw_xlsx, sheet = 2)
+
+#Keep the FOMC date and the wide-window surprise
 gw_daily <- gw_raw %>%
   rename(
     dated = DATE,
@@ -20,26 +51,21 @@ gw_daily <- gw_raw %>%
   ) %>%
   mutate(
     dated = as.Date(dated),
-    # Excel says shocks are in percent.
-    # The original Stata code divides by 100 to convert percent to decimal.
+    # Source file reports surprises in percent; the do-file rescales to decimals so coefficients are read per percentage point
     GW_wide = GW_wide / 100
   ) %>%
   select(dated, GW_wide) %>%
   filter(!is.na(dated), !is.na(GW_wide)) %>%
   arrange(dated)
-#Checking duplicates
+
+# Checking duplicates
 gw_daily %>%
   count(dated) %>%
   filter(n > 1)
 
-write_csv(
-  gw_daily,
-  "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/construct_shocks_daily.csv"
-)
-# ------------------------------------------------------------
-# 3. Create quarterly timing weights
-# ------------------------------------------------------------
+write_csv(gw_daily, file_shocks_daily)
 
+# Create quarterly timing weights
 gw_quarterly_input <- gw_daily %>%
   mutate(
     dateq = as.yearqtr(dated),
@@ -54,10 +80,8 @@ gw_quarterly_input <- gw_daily %>%
     GW_wide_to_current_shock = weight_to_current_shock * GW_wide,
     GW_wide_to_next_shock = weight_to_next_shock * GW_wide
   )
-# ------------------------------------------------------------
-# 4. Collapse event shocks to quarter-level shocks
-# ------------------------------------------------------------
 
+# Collapse event shocks to quarter-level shocks
 gw_quarterly <- gw_quarterly_input %>%
   group_by(dateq) %>%
   summarise(
@@ -72,4 +96,4 @@ gw_quarterly <- gw_quarterly_input %>%
   ) %>%
   select(dateq, GW_wide, GW_wide_w)
 
-write_csv(gw_quarterly, "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/construct_shocks_quarterly.csv")
+write_csv(gw_quarterly, file_shocks_quarterly)

@@ -1,14 +1,149 @@
-library(tidyverse)
-library(lubridate)
-library(zoo)
-library(haven)
-library(readr)
-library(slider)
-library(dplyr)
-# 1. downloaded quarterly Compustat file
-comp <- read_dta("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_raw/Quarterly_data.dta")
+# ============================================================
+# Ottonello & Winberry (2020, Econometrica)
+# "Financial Heterogeneity and the Investment Channel of Monetary Policy"
+#
+# Panel construction: R translation of the authors' Stata pipeline,
+# sections I-III. Section numbers follow the authors' Stata do-file.
+# Gaps in the numbering correspond to steps handled in separate scripts or outside the scope of this replication.
+# 
+# Inputs:  data_raw/Quarterly_data.dta, data_raw/DS_yearinc.csv, plus the
+#          shock, BEA and FRED series built by earlier scripts into
+#          data_constructed/
+# Outputs: construct_panel_data_firm_compustat.csv
+#          construct_panel_data_firm_trim.csv
+#          construct_panel_data_aggregate.csv
+# ============================================================
 
-# 2. Make sure key ID variables are numeric where needed
+library(tidyverse)  # dplyr, tidyr, stringr, readr
+library(zoo)        # as.yearqtr
+library(haven)      # read_dta
+library(slider)     # slide_dbl
+
+
+# ============================================================
+# Paths
+# ============================================================
+
+# Set dir_root to the top level of the replication package. This is the
+# only line that needs to change when moving between machines.
+dir_root <- "."
+
+dir_raw         <- file.path(dir_root, "data_raw")
+dir_constructed <- file.path(dir_root, "data_constructed")
+
+# Raw inputs
+file_compustat_raw <- file.path(dir_raw, "Quarterly_data.dta")
+file_ds_yearinc    <- file.path(dir_raw, "DS_yearinc.csv")
+
+# Series built by earlier scripts
+file_shocks <- file.path(dir_constructed, "construct_shocks_quarterly.csv")
+file_bea    <- file.path(dir_constructed, "bea_fixed_assets_depreciation_data.csv")
+file_fred   <- file.path(dir_constructed, "fred_quarterly.csv")
+
+# Intermediate checkpoint, written then read back
+file_compustat_clean <- file.path(
+  dir_constructed, "compustat_quarterly_variables_clean.csv"
+)
+
+# Outputs
+file_panel_compustat <- file.path(
+  dir_constructed, "construct_panel_data_firm_compustat.csv"
+)
+file_panel_aggregate <- file.path(
+  dir_constructed, "construct_panel_data_aggregate.csv"
+)
+file_panel_trim <- file.path(
+  dir_constructed, "construct_panel_data_firm_trim.csv"
+)
+
+
+# ============================================================
+# Helper functions
+# ============================================================
+
+# Stata-style lag: returns the previous value only when the previous row is
+# exactly one quarter back, otherwise NA. Used for the Ltrim flags.
+lag_quarter <- function(x, dateq) {
+  previous_x <- lag(x)
+  previous_date <- lag(dateq)
+  
+  consecutive <- as.numeric(dateq - previous_date) == 0.25
+  
+  if_else(
+    !is.na(consecutive) & consecutive,
+    previous_x,
+    NA
+  )
+}
+
+# Winsorise at the 0.5th and 99.5th percentiles.
+# type = 2 reproduces Stata's default quantile definition.
+winsor_005 <- function(x) {
+  if (all(is.na(x))) {
+    return(x)
+  }
+  bounds <- quantile(x, probs = c(0.005, 0.995), na.rm = TRUE, type = 2)
+  pmin(pmax(x, bounds[[1]]), bounds[[2]])
+}
+# Standardise to mean zero, unit variance. Returns all NA if the variable is
+# constant or entirely missing.
+standardize <- function(x) {
+  x_mean <- mean(x, na.rm = TRUE)
+  x_sd <- sd(x, na.rm = TRUE)
+  
+  if (is.na(x_sd) || x_sd == 0) {
+    return(rep(NA_real_, length(x)))
+  }
+  (x - x_mean) / x_sd
+}
+
+# Capital series for one firm-spell: anchor at gross PP&E in the first
+# Anchor capital at gross PP&E, then accumulate net investment forward
+build_capital <- function(ppegtq, netinv, netinv_seq, first_ppegtq) {
+  n <- length(ppegtq)
+  capital <- rep(NA_real_, n)
+  
+  if (n == 0 || all(is.na(first_ppegtq))) {
+    return(capital)
+  }
+  
+  start_seq <- first(na.omit(first_ppegtq))
+  start_row <- which(netinv_seq == start_seq & !is.na(ppegtq))[1]
+  
+  if (is.na(start_row)) {
+    return(capital)
+  }
+  
+  # Anchor capital using gross PP&E
+  capital[start_row] <- ppegtq[start_row]
+  
+  # Accumulate net investment forward
+  if (start_row < n) {
+    for (i in seq.int(start_row + 1, n)) {
+      if (
+        !is.na(capital[i - 1]) &&
+        !is.na(netinv[i]) &&
+        !is.na(netinv_seq[i]) &&
+        netinv_seq[i] > start_seq
+      ) {
+        capital[i] <- capital[i - 1] + netinv[i]
+      }
+    }
+  }
+  
+  capital
+}
+
+
+# ============================================================
+# I.1  Clean the raw Compustat quarterly extract
+# ============================================================
+
+
+# Load the raw quarterly Compustat extract
+comp <- read_dta(file_compustat_raw)
+
+# Make sure key ID variables are numeric where needed
 comp <- comp %>%
   mutate(
     gvkey = as.numeric(gvkey),
@@ -16,20 +151,14 @@ comp <- comp %>%
     naics = as.numeric(naics)
   )
 
-# 3. Drop observations with missing calendar quarter
+# Drop observations with missing calendar quarter
 comp <- comp %>%
   filter(!is.na(datacqtr))
 
-# 4. Check duplicates by firm-date
-dup_gvkey_datadate <- comp %>%
-  count(gvkey, datadate) %>%
-  filter(n > 1)
+# Raw extract should be unique by firm-date
+stopifnot(!any(duplicated(comp[c("gvkey", "datadate")])))
 
-dup_gvkey_datadate
-#No such observations here
-
-
-# 5. Convert date format
+# Build the quarterly date index from datacqtr
 comp <- comp %>%
   mutate(
     year = as.numeric(str_sub(datacqtr, 1, 4)),
@@ -37,7 +166,7 @@ comp <- comp %>%
     dateq = as.yearqtr(paste(year, quarter), format = "%Y %q")
   ) %>%
   select(-datacqtr)
-# 6. If there are duplicate gvkey-dateq rows for qdate, keep updq == 3 
+# Resolve duplicate firm-quarters: prefer the fully updated record (updq == 3), then the latest datadate
 comp <- comp %>%
   group_by(gvkey, dateq) %>%
   arrange(desc(updq == 3), desc(datadate), .by_group = TRUE) %>%
@@ -48,36 +177,21 @@ comp <- comp %>%
 stopifnot(comp %>% count(gvkey, dateq) %>% filter(n > 1) %>% nrow() == 0)
 
 comp <- comp %>% select(-datadate, -fyearq)
-#checking
-dup_gvkey_dateq <- comp %>%
-  count(gvkey, dateq) %>%
-  filter(n > 1)
-dup_gvkey_dateq ##Should be 0
 
-#Record first quarter each appears
-comp <- comp %>%
-  group_by(gvkey) %>%
-  mutate(min_dateq = min(dateq, na.rm = TRUE)) %>%
-  ungroup()
-
-#  drop finance and utilities
+# Drop financials (SIC 6000-6799) and utilities (SIC 4900-4999)
 comp <- comp %>%
   filter(is.na(sic) | !(sic >= 6000 & sic <= 6799)) %>%
   filter(is.na(sic) | !(sic >= 4900 & sic <= 4999))
 
-# 9. Keep U.S.-incorporated firms
+# Keep U.S.-incorporated firms
 comp <- comp %>%
   filter(fic == "USA")
 
-##Adding DS worldscope data
-ds_yearinc <- read_csv("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_raw/DS_yearinc.csv")
+# Merge DS Worldscope incorporation dates
+ds_yearinc <- read_csv(file_ds_yearinc)
 
 comp <- comp %>%
   left_join(ds_yearinc, by = "cusip")
-
-# Sort as firm-quarter panel
-comp <- comp %>%
-  arrange(gvkey, dateq)
 
 # Fill missing quarterly gaps within each firm
 comp <- comp %>%
@@ -101,11 +215,14 @@ comp_clean <- comp %>%
   select(any_of(vars_to_keep))
 
 # Save cleaned Compustat quarterly file
-write_csv(comp_clean, "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/compustat_quarterly_variables_clean.csv")
+write_csv(comp_clean, file_compustat_clean)
 
-## NOW WE MOVE TO I.3, but we only use GW merging to get 
-comp_clean <- read_csv("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/compustat_quarterly_variables_clean.csv")
-shocks <- read_csv("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/construct_shocks_quarterly.csv")
+# ============================================================
+# I.3  Merge monetary shocks, BEA depreciation and FRED aggregates
+# ============================================================
+
+comp_clean <- read_csv(file_compustat_clean)
+shocks <- read_csv(file_shocks)
 
 comp_clean <- comp_clean %>%
   mutate(dateq = as.yearqtr(dateq))
@@ -116,8 +233,8 @@ shocks <- shocks %>%
 comp_merged <- comp_clean %>%
   left_join(shocks, by = "dateq")
 
-bea_quarterly <- read_csv("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/bea_fixed_assets_depreciation_data.csv")
-#making the two datasets
+bea_quarterly <- read_csv(file_bea)
+# Map two-digit NAICS to the BEA sector depreciation rate
 comp_merged <- comp_merged %>%
   mutate(
     naics_id = as.numeric(str_sub(as.character(naics), 1, 2))
@@ -133,7 +250,10 @@ comp_merged <- comp_merged %>%
     by = c("naics_id", "dateq")
   )
 
-##II 2, Capital and investment variables creation 
+# ============================================================
+# II.2  Capital and investment variables
+# ============================================================
+
 comp_panel <- comp_merged %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -155,7 +275,7 @@ comp_panel <- comp_merged %>%
   ) %>%
   ungroup()
 
-#creating continuous spells and using it to get values
+# Number continuous spells of non-missing net investment within each firm
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -195,7 +315,7 @@ comp_panel <- comp_panel %>%
   ungroup() %>%
   select(-spell_start, -spell_counter)
 
-#add quarter before spell
+# Attach the quarter before each spell (seq 0) as the gross PP&E anchor
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -220,7 +340,7 @@ comp_panel <- comp_panel %>%
   ) %>%
   ungroup()
 
-#Finding the usable ppegtq in each case
+# Earliest position in the spell with non-missing gross PP&E
 comp_panel <- comp_panel %>%
   group_by(gvkey, netinv_spell) %>%
   mutate(
@@ -234,61 +354,8 @@ comp_panel <- comp_panel %>%
     }
   ) %>%
   ungroup()
-comp_panel <- comp_panel %>%
-  group_by(gvkey, netinv_spell) %>%
-  mutate(
-    first_ppegtq = if (
-      all(is.na(netinv_spell)) ||
-      all(is.na(ppegtq))
-    ) {
-      NA_integer_
-    } else {
-      min(netinv_seq[!is.na(ppegtq)], na.rm = TRUE)
-    }
-  ) %>%
-  ungroup()
 
-# Construct capital recursively, by making this helper function
-build_capital <- function(ppegtq, netinv, netinv_seq, first_ppegtq) {
-  n <- length(ppegtq)
-  capital <- rep(NA_real_, n)
-
-  if (n == 0 || all(is.na(first_ppegtq))) {
-    return(capital)
-  }
-
-  start_seq <- first(na.omit(first_ppegtq))
-
-  if (length(start_seq) == 0) {
-    return(capital)
-  }
-
-  start_row <- which(netinv_seq == start_seq & !is.na(ppegtq))[1]
-
-  if (is.na(start_row)) {
-    return(capital)
-  }
-
-  # Anchor capital using gross PP&E
-  capital[start_row] <- ppegtq[start_row]
-
-  # Accumulate net investment forward
-  if (start_row < n) {
-    for (i in seq.int(start_row + 1, n)) {
-      if (
-        !is.na(capital[i - 1]) &&
-        !is.na(netinv[i]) &&
-        !is.na(netinv_seq[i]) &&
-        netinv_seq[i] > start_seq
-      ) {
-        capital[i] <- capital[i - 1] + netinv[i]
-      }
-    }
-  }
-
-  capital
-}
-#Apply it to each firm-spell:
+# Apply per firm-spell and drop single-observation capital series
 spell_rows <- comp_panel %>%
   filter(!is.na(netinv_spell)) %>%
   group_by(gvkey, netinv_spell) %>%
@@ -318,7 +385,7 @@ comp_panel <- comp_panel %>%
     spell_rows,
     by = c("gvkey", "dateq")
   )
-# Use BEA data
+# Nominal investment: change in capital plus industry depreciation
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -330,10 +397,12 @@ comp_panel <- comp_panel %>%
   ) %>%
   ungroup()
 
-# II 3Creating the main shock variables and firm variables
-#first we add the fred data and merge
+# ============================================================
+# II.3  Shock and firm-level variables
+# ============================================================
 
-fred_quarterly = read_csv("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/fred_quarterly.csv")
+# Merge quarterly FRED aggregates
+fred_quarterly 	<- read_csv(file_fred)
 
 fred_quarterly <- fred_quarterly %>%
   mutate(
@@ -343,58 +412,28 @@ fred_quarterly <- fred_quarterly %>%
 comp_panel <- comp_panel %>%
   left_join(fred_quarterly, by = "dateq")
 
-
-
-# Making real variables:
+# Deflate nominal series by the investment price deflator
 comp_panel <- comp_panel %>%
-  arrange(gvkey, dateq) %>%
-  group_by(gvkey) %>%
   mutate(
     real_capital = 100 * capital / ipd,
     real_inv = 100 * nom_inv / ipd,
     real_sales = 100 * saleq / ipd,
     real_total_assets = 100 * atq / ipd
-  ) %>%
-  ungroup()
+  ) 
 
+# Balance-sheet identities used by the flow variables below
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
   mutate(
-    # Shock variables
-    wide = -GW_wide_w,
-    wide_sum = -GW_wide,
-    pos_wide = wide * (wide > 0),
-    neg_wide = wide * (wide < 0),
-    
-    # Basic firm variables
-    total_assets = atq,
+    total_assets      = atq,
     total_liabilities = ltq,
-    debt = lag(dlcq) + lag(dlttq),
-    equity = total_assets - total_liabilities,
-    
-    liquidity = (lag(actq) - lag(lctq)) / lag(atq),
-    liq_ch = lag(cheq) / lag(atq),
-    lev = (lag(dlcq) + lag(dlttq)) / lag(atq),
-    levavg = (lev + lag(lev) + lag(lev, 2) + lag(lev, 3)) / 4,
-    
-    size = if_else(
-      lag(real_total_assets) > 0,
-      log(lag(real_total_assets)),
-      NA_real_
-    ),
-    
-    rsales_g = if_else(
-      lag(real_sales) > 0 & lag(real_sales, 2) > 0,
-      log(lag(real_sales)) - log(lag(real_sales, 2)),
-      NA_real_
-    ),
-    
-    divmiss_dvpq = if_else(!is.na(dvpq), dvpq > 0, NA)
+    debt              = lag(dlcq) + lag(dlttq),
+    equity            = total_assets - total_liabilities
   ) %>%
   ungroup()
 
-#Getting the remaining variables
+# Getting the remaining variables
 
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
@@ -440,7 +479,7 @@ comp_panel <- comp_panel %>%
   ) %>%
   ungroup()
 
-#gen rsales_growth = (real_sales-L4.real_sales)/L4.real_sales
+# Stata: gen rsales_growth = (real_sales - L4.real_sales)/L4.real_sales
 
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
@@ -476,44 +515,10 @@ comp_panel <- comp_panel %>%
   ) %>%
   ungroup()
 
-#gen rsales_growth = (real_sales-L4.real_sales)/L4.real_sales
-comp_panel <- comp_panel %>%
-  arrange(gvkey, dateq) %>%
-  group_by(gvkey) %>%
-  mutate(
-    rsales_growth = if_else(
-      lag(real_sales, 4) != 0 &
-        !is.na(lag(real_sales, 4)),
-      (real_sales - lag(real_sales, 4)) /
-        lag(real_sales, 4),
-      NA_real_
-    ),
-    
-    rsales_sd_5yr = slide_dbl(
-      rsales_growth,
-      ~ {
-        values <- .x[!is.na(.x)]
-        if (length(values) >= 2) sd(values) else NA_real_
-      },
-      .before = 19,
-      .complete = FALSE
-    ),
-    
-    rsales_sd_10yr = slide_dbl(
-      rsales_growth,
-      ~ {
-        values <- .x[!is.na(.x)]
-        if (length(values) >= 2) sd(values) else NA_real_
-      },
-      .before = 39,
-      .complete = FALSE
-    )
-  ) %>%
-  ungroup()
 comp_panel <- comp_panel %>%
   select(-rsales_growth)
 
-#Construct SIC industry groups
+# Major SIC industry groups
 comp_panel <- comp_panel %>%
   mutate(
     maj_sic = if_else(
@@ -583,9 +588,8 @@ comp_panel <- comp_panel %>%
     )
   )
 
-#My dateq is in years so i will redo it and make it in terms of quarterly data
+# One incorporation date per gvkey: gvkeys map to several cusips, so keep the earliest
 
-#gvkeys map to multiple cusips
 inc_bridge <- comp %>%
   distinct(gvkey, cusip) %>%
   left_join(
@@ -603,7 +607,7 @@ inc_bridge <- comp %>%
   ungroup() %>%
   select(gvkey, inc_date, inc_dateq_exact)
 
-inc_bridge %>% count(gvkey) %>% filter(n > 1) %>% nrow()
+stopifnot(nrow(inc_bridge) == n_distinct(inc_bridge$gvkey))
 
 
 comp_panel <- comp_panel %>%
@@ -627,7 +631,8 @@ comp_panel <- comp_panel %>%
   ) %>%
   ungroup() %>%
   select(-min_dateq)
-#age dummies
+
+# Age dummies
 
 comp_panel <- comp_panel %>%
   mutate(
@@ -647,7 +652,7 @@ comp_panel <- comp_panel %>%
       TRUE ~ 0
     )
   )
-#Dividend-paying dummy creation
+# Dividend-paying dummy creation
 comp_panel <- comp_panel %>%
   mutate(
     divmiss_dvpq = case_when(
@@ -669,7 +674,7 @@ comp_panel <- comp_panel %>%
   ungroup() %>%
   select(-Laqcy)
 
-# Creating sample and timing dummies
+# Sample and timing dummies
 comp_panel <- comp_panel %>%
   mutate(
     great_recession = as.numeric(
@@ -684,7 +689,7 @@ comp_panel <- comp_panel %>%
       TRUE ~ 0
     )
   )
-#Creating Gertler–Gilchrist size classification
+# Creating Gertler–Gilchrist size classification
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -736,7 +741,7 @@ comp_panel <- comp_panel %>%
     -pct_GGsales
   )
 
-#Creating shock panel
+# Shock variables and their lags
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -766,7 +771,7 @@ comp_panel <- comp_panel %>%
   ) %>%
   ungroup()
 
-#firm-level covariates block
+# Firm-level covariates
 
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
@@ -879,7 +884,7 @@ comp_panel <- comp_panel %>%
   ) %>%
   ungroup()
 
-# cumulative dynamic response variables
+# Cumulative dynamic response variables
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey)
@@ -909,7 +914,7 @@ for (i in 1:20) {
 comp_panel <- comp_panel %>%
   ungroup()
 
-# lagged aggregate controls.
+# Lagged aggregate controls.
 comp_panel <- comp_panel %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -920,27 +925,21 @@ comp_panel <- comp_panel %>%
     Lur = lag(ur)
   ) %>%
   ungroup()
-#Checkpoint
-write_csv(comp_panel, "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/construct_panel_data_firm_compustat.csv")
-# Section III_ Trim Final Sample and Generate Sample-dependent Standardized Variables
+# Checkpoint: firm-quarter panel before trimming
+write_csv(comp_panel, file_panel_compustat)
+
+# ============================================================
+# III Trim Final Sample and Generate Sample-dependent Standardized Variables
+# ============================================================
 
 
-## III.1 
+# ============================================================
+# III.1  Trim the estimation sample
+# ============================================================
 
-lag_quarter <- function(x, dateq) {
-  previous_x <- lag(x)
-  previous_date <- lag(dateq)
-  
-  consecutive <- as.numeric(dateq - previous_date) == 0.25
-  
-  if_else(
-    !is.na(consecutive) & consecutive,
-    previous_x,
-    NA
-  )
-}
 comp_trim <- comp_panel
-#removing non positive capital or assets
+
+# Drop non-positive capital or total assets
 comp_trim <- comp_trim %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -954,7 +953,7 @@ comp_trim <- comp_trim %>%
   ) %>%
   ungroup() %>%
   filter(!trim_capital)
-# remove large aquisitions
+# Drop quarters with acquisitions above 5% of assets
 comp_trim <- comp_trim %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -972,7 +971,7 @@ comp_trim <- comp_trim %>%
   filter(!trim_acquisitions) %>%
   select(-acquisition_ratio)
 
-#Trim extreme investment rates
+# Drop the top and bottom 0.5% of investment rates (quantile type = 2 matches Stata's default)
 bottom_inv <- quantile(
   comp_trim$inv_rate,
   probs = 0.005,
@@ -1018,7 +1017,6 @@ comp_trim <- comp_trim %>%
   ungroup() %>%
   filter(!trim_spell)
 
-#Flag the top 1% by leverage and cash holdings
 lev_p99 <- quantile(
   comp_trim$lev,
   0.99,
@@ -1047,7 +1045,7 @@ comp_trim <- comp_trim %>%
       TRUE ~ 0
     )
   )
-#Remove extreme liquidity
+# Remove extreme liquidity
 
 comp_trim <- comp_trim %>%
   arrange(gvkey, dateq) %>%
@@ -1096,6 +1094,7 @@ comp_trim <- comp_trim %>%
   ungroup() %>%
   filter(!trim_rsales)
 
+# Remove negative sales
 comp_trim <- comp_trim %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -1105,19 +1104,8 @@ comp_trim <- comp_trim %>%
   ) %>%
   ungroup() %>%
   filter(!trim_saleq)
-# Remove negative sales
-comp_trim <- comp_trim %>%
-  arrange(gvkey, dateq) %>%
-  group_by(gvkey) %>%
-  mutate(
-    trim_saleq = coalesce(saleq < 0, FALSE),
-    
-    Ltrim_saleq =
-      lag_quarter(trim_saleq, dateq)
-  ) %>%
-  ungroup() %>%
-  filter(!trim_saleq)
-#Remove negative cash-to-assets ratios
+
+# Remove negative cash-to-assets ratios
 comp_trim <- comp_trim %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -1131,33 +1119,10 @@ comp_trim <- comp_trim %>%
   filter(!trim_liqch)
 
 
-# III.2_ Generate Sample-Dependent Standardize Variables
+# ============================================================
+# III.2  Sample-dependent standardised variables
+# ==========================================================
 
-#Define helper functions
-winsor_005 <- function(x) {
-  if (all(is.na(x))) {
-    return(x)
-  }
-  bounds <- quantile(
-    x,
-    probs = c(0.005, 0.995),
-    na.rm = TRUE,
-    type = 2
-  )
-  pmin(
-    pmax(x, bounds[[1]]),
-    bounds[[2]]
-  )
-}
-standardize <- function(x) {
-  x_mean <- mean(x, na.rm = TRUE)
-  x_sd <- sd(x, na.rm = TRUE)
-  
-  if (is.na(x_sd) || x_sd == 0) {
-    return(rep(NA_real_, length(x)))
-  }
-  (x - x_mean) / x_sd
-}
 # Standardizing the basic variables
 basic_std_vars <- c(
   "rsales_Fg4",
@@ -1206,7 +1171,8 @@ for (var in nodem_vars) {
     comp_trim[[std_name]] * comp_trim$wide
 }
 
-#winsorizing
+# Winsorise at 0.5%/99.5%, then demean within firm, then standardise
+
 demean_vars <- c("lev","liq_ch","levavg","levnet","shstdt","shltdt","sh_ol",
   "sh_l","cash_ebit","levL1","levL2","levL4"
 )
@@ -1228,7 +1194,8 @@ comp_trim <- comp_trim %>%
   ) %>%
   ungroup()
 dem_names <- paste0(demean_vars, "_wins_dem")
-#clearing NA ones
+# NaN arises where a firm has no non-missing values; recode to NA
+
 comp_trim <- comp_trim %>%
   mutate(
     across(
@@ -1255,7 +1222,7 @@ for (var in demean_vars) {
 }
 comp_trim <- comp_trim %>%
   select(-all_of(paste0(demean_vars, "_wins")))
-#We only do for leverage without distance to default
+	# Leverage only: distance-to-default is out of scope
 comp_trim <- comp_trim %>%
   mutate(
     lev_wins_dem_std_pwide =
@@ -1270,7 +1237,7 @@ comp_trim <- comp_trim %>%
     lev_wins_dem_std_dmffr =
       lev_wins_dem_std * dmffr
   )
-#changing names to fit stata
+# Match Stata naming: liq_ch_wins_* -> liq_wins_*
 comp_trim <- comp_trim %>%
   rename_with(
     ~ sub("^liq_ch_wins_", "liq_wins_", .x),
@@ -1367,16 +1334,15 @@ for (var in heterogeneity_vars) {
   comp_trim[[paste0(var, "_gdp")]] <-
     comp_trim[[var]] * comp_trim$Ldlog_gdp
 }
-#keep a row only if every Ltrim is a non-missing FALSE.
+# Keep a row only if every Ltrim flag is a non-missing FALSE. Applied after winsorising and standardising so that those moments are computed on the pre-Ltrim sample, matching the Stata ordering
 comp_trim <- comp_trim %>%
   filter(!if_any(starts_with("Ltrim"), ~ is.na(.x) | .x))
 
-# III.3
-attr(comp_trim$wide, "label") <- "ffr shock"
-attr(comp_trim$wide_sum, "label") <- "ffr shock (sum)"
+# ============================================================
+# III.3  Labelling and saving
+# ============================================================
 
-# Credit-rating variables were skipped because construct_compustat_rating.dta was not available in the replication package / current data files, and the required Compustat S&P rating variable was not available in the downloaded Compustat data. Main leverage-based results are continued without ratings.
-# placeholder
+# Restriction R4: credit ratings. Columns are retained as NA so downstream table code runs unchanged.
 comp_trim <- comp_trim %>%
   mutate(
     rating_enc = NA_real_,
@@ -1385,7 +1351,7 @@ comp_trim <- comp_trim %>%
     aboveA_dummy_gdp = NA_real_
   )
 
-#Constructing real capital and investment growth
+# Aggregate average investment growth, seasonally adjusted
 aggregate_panel <- comp_trim %>%
   arrange(gvkey, dateq) %>%
   group_by(gvkey) %>%
@@ -1395,15 +1361,14 @@ aggregate_panel <- comp_trim %>%
       cap_ipd > 0 & lag(cap_ipd) > 0,
       100 * (log(cap_ipd) - log(lag(cap_ipd))),
       NA_real_
-    ),
-    firm_count = 1
+    )
   ) %>%
   ungroup()
 aggregate_panel <- aggregate_panel %>%
   group_by(dateq) %>%
   summarise(
-    count_firms_invavg = sum(firm_count, na.rm = TRUE),
-    inv_avg_ipd_nsa = mean(inv_ipd, na.rm = TRUE),
+    count_firms_invavg = n(),
+    inv_avg_ipd_nsa    = mean(inv_ipd, na.rm = TRUE),
     .groups = "drop"
   )
 
@@ -1430,11 +1395,12 @@ aggregate_panel <- aggregate_panel %>%
     inv_avg_ipd_nsa,
     inv_avg_ipd_sa1
   )
+# ---- Macro lags ----
 
-# --- Macro lags: calendar lags from full FRED series, then Stata-style
-# --- gap-nulling (Lk. is missing if the firm lacks the row k quarters back)
+# Calendar lags taken from the full FRED series, then nulled Stata-style:
+# L(k) is missing if the firm has no observation k quarters back.
 
-fred_lags <- fred_quarterly %>%       # the object you loaded earlier in this script
+fred_lags <- fred_quarterly %>%       
   arrange(dateq) %>%
   mutate(
     L1_dlog_gdp = lag(dlog_gdp, 1), L2_dlog_gdp = lag(dlog_gdp, 2),
@@ -1463,12 +1429,9 @@ comp_trim <- comp_trim %>%
   ungroup() %>%
   select(-has_L1, -has_L2, -has_L3, -has_L4)
 
-#Save
-write_csv(
-  aggregate_panel,
-  "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/construct_panel_data_aggregate.csv"
-)
-#saving panel data
-write_csv(comp_trim, "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/construct_panel_data_firm_trim.csv")
+# Save
+write_csv(aggregate_panel, file_panel_aggregate)
+# Saving panel data
+write_csv(comp_trim, file_panel_trim)
 
 

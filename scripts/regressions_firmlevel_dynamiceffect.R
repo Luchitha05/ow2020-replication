@@ -1,29 +1,59 @@
-library(tidyverse)
-library(haven)
-library(fixest)
-library(modelsummary)
-library(readr)
+# ============================================================
+# Ottonello & Winberry (2020, Econometrica)
+# "Financial Heterogeneity and the Investment Channel of Monetary Policy"
+#
+# Figure 1(a): local projections of the leverage-shock interaction
+# coefficient at horizons h = 0 to 20, plotted in the paper's style and
+# overlaid on the authors' published path. Section numbers follow the
+# estimation pipeline. Gaps in the numbering correspond to steps handled
+# in separate scripts or outside the scope of this replication.
+#
+# Inputs:  construct_panel_data_firm_trim.csv, built by
+#          construct_panel_data.R into data_constructed/
+#          results/dynamics_lev_baseline.csv, shipped with the replication
+#          package, holding the authors' own Figure 1(a) coefficients
+# Outputs: figure1a_leverage_paper_style.png
+#          figure1a_overlay.png
+# ============================================================
+library(tidyverse)  # dplyr, tidyr, purrr, ggplot2, readr
+library(fixest)     # feols, nobs
+# ============================================================
+# Paths
+# ============================================================
+dir_root <- "."
+dir_constructed <- file.path(dir_root, "data_constructed")
+dir_results  <- file.path(dir_root, "results")
+# Panel built by an earlier script
+file_panel_trim <- file.path(dir_constructed, "construct_panel_data_firm_trim.csv")
+# Published path, shipped with the replication package
+file_ow_lev     <- file.path(dir_results, "dynamics_lev_baseline.csv")
+# Outputs
+file_fig1a_png   <- file.path(dir_results, "figure1a_leverage_paper_style.png")
+file_overlay_png <- file.path(dir_results, "figure1a_overlay.png")
+dir.create(dir_results, recursive = TRUE, showWarnings = FALSE)
 
-comp_trim <- read_csv(
-  file.path("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/construct_panel_data_firm_trim.csv")
-)
+# ============================================================
+# 1  Load the constructed firm panel
+# ============================================================
 
+comp_trim <- read_csv(file_panel_trim, show_col_types = FALSE)
+stopifnot(!any(duplicated(comp_trim[c("gvkey", "dateq")])))
 
+# ============================================================
+# 2  Firm-level controls
+# ============================================================
 controls_firm <- c("rsales_g_std","size_std","sh_current_a_std")
 
-# Figure 1 uses firm controls only.
-#Aggregate controls are NOT included in this specific regression,because the paper absorbs major-industry x date fixed effects.
-
-# ------------------------------------------------------------
-# 4. Run Figure 1a regressions: leverage
-# ------------------------------------------------------------
+# ============================================================
+# 3  Figure 1(a) regressions: leverage
+# ============================================================
+# One regression per horizon h = 0, ..., 20, with the cumulative investment
+# response cumF{h}dlog_capital on the left-hand side.
 
 fig1_lev_models <- list()
 
 for (lead in 0:20) {
-  
   outcome_var <- paste0("cumF", lead, "dlog_capital")
-  
   regression_formula <- as.formula(
     paste0(
       outcome_var,
@@ -34,7 +64,6 @@ for (lead in 0:20) {
       " | gvkey + maj_ind^dateq + fiscal_dummy"
     )
   )
-  
   fig1_lev_models[[paste0("h", lead)]] <- feols(
     regression_formula,
     data = comp_trim %>% filter(!great_recession),
@@ -42,9 +71,9 @@ for (lead in 0:20) {
   )
 }
 
-# ------------------------------------------------------------
-# 5. Extract coefficient and standard error for plotting
-# ------------------------------------------------------------
+# ============================================================
+# 4  Coefficient and standard error at each horizon
+# ============================================================
 
 fig1_lev_results <- map_dfr(
   0:20,
@@ -69,33 +98,15 @@ fig1_lev_results <- map_dfr(
   }
 )
 
-#write_csv(fig1_lev_results,file.path(results, "dynamics_lev_baseline.csv"))
-
 print(fig1_lev_results)
-# ------------------------------------------------------------
-# 6. Plot Figure 1a
-# ------------------------------------------------------------
 
-fig1_lev_plot <- ggplot(fig1_lev_results, aes(x = horizon, y = beta_h)) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  geom_ribbon(
-    aes(ymin = ci_low_90, ymax = ci_high_90),
-    alpha = 0.2
-  ) +
-  geom_line(linewidth = 1) +
-  geom_point(size = 2) +
-  scale_x_continuous(breaks = seq(0, 20, by = 4)) +
-  labs(
-    title = "Figure 1a: Dynamics of Differential Investment Response",
-    subtitle = "Leverage interaction with monetary policy shock",
-    x = "Horizon, quarters",
-    y = expression(beta[h])
-  ) +
-  theme_minimal()
+write_csv(fig1_lev_results, file.path(dir_results, "dynamics_lev_replication.csv"))
 
-print(fig1_lev_plot)
 
-#Alternative more like the paper
+# ============================================================
+# 5  Plot the replicated path
+# ============================================================
+
 fig1_lev_paper <- fig1_lev_results %>%
   filter(horizon <= 12) %>%
   mutate(
@@ -127,26 +138,23 @@ fig1_lev_plot_paper <- ggplot(fig1_lev_paper, aes(x = horizon)) +
     panel.grid.major = element_line(linewidth = 0.3),
     panel.grid.minor = element_blank()
   )
-
 print(fig1_lev_plot_paper)
-
 ggsave(
-  filename = file.path("~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/Replication/Results/figure1a_leverage_paper_style.png"),
+  filename = file_fig1a_png,
   plot = fig1_lev_plot_paper,
   width = 5.5,
   height = 4.2,
   dpi = 300
 )
+# ============================================================
+# 6 The authors' published path, and comparison
+# ============================================================
+# The shipped csv has no header row: line 1 holds the 21 coefficients and
+# line 2 the 21 standard errors, each with a leading label field. read_csv
+# would take line 1 as column names, so the file is read with readLines and
+# split by hand
 
-#Combining OW's figure 1(a)
-
-# STEP 1 — Re-read raw, bypassing R's header parsing entirely
-
-raw_lines <- readLines(
-  "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/results/dynamics_lev_baseline.csv"
-)
-raw_lines   
-
+raw_lines <- readLines(file_ow_lev)
 header_vals <- strsplit(raw_lines[1], ",")[[1]]
 data_vals   <- strsplit(raw_lines[2], ",")[[1]]
 
@@ -154,6 +162,8 @@ data_vals   <- strsplit(raw_lines[2], ",")[[1]]
 header_num <- as.numeric(gsub('"', '', header_vals[-1]))
 data_num   <- as.numeric(gsub('"', '', data_vals[-1]))
 
+# Guards on the shape and on the two published impact values, so a change
+# in the shipped file is caught before it reaches the overlay
 stopifnot(length(header_num) == 21, length(data_num) == 21)
 stopifnot(round(header_num[1], 2) == -0.57)
 stopifnot(round(data_num[1], 2) == 0.27)
@@ -170,10 +180,7 @@ ow_lev_path <- tibble(
 
 print(ow_lev_path, n = 21)
 
-###########################################################
 # Merge with the replicated path
-###########################################################
-
 fig1_compare <- fig1_lev_results %>%
   filter(horizon <= 12) %>%
   left_join(ow_lev_path %>% filter(horizon <= 12), by = "horizon") %>%
@@ -191,10 +198,9 @@ fig1_compare %>%
   select(horizon, beta_h, repl_norm, ow_beta, ow_norm) %>%
   print(n = 13)
 
-###########################################################
-# Overlay plot
-###########################################################
-
+# ============================================================
+# 7  Overlay plot
+# ============================================================
 fig1_overlay <- ggplot(fig1_compare, aes(x = horizon)) +
   geom_hline(yintercept = 0, linewidth = 0.6, color = "black") +
   geom_ribbon(aes(ymin = repl_ci_low_90, ymax = repl_ci_high_90),
@@ -218,15 +224,10 @@ fig1_overlay <- ggplot(fig1_compare, aes(x = horizon)) +
 print(fig1_overlay)
 
 ggsave(
-  filename = file.path(
-    "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/Replication/Results/figure1a_overlay.png"
-  ),
+  filename = file_overlay_png,
   plot = fig1_overlay, width = 6.5, height = 4.5, dpi = 300
 )
 
-###########################################################
-# Numeric table for the write-up
-###########################################################
 
 fig1_table <- fig1_compare %>%
   transmute(
@@ -235,4 +236,5 @@ fig1_table <- fig1_compare %>%
     ow_beta   = round(ow_beta, 2), ow_se   = round(ow_se, 2),
     diff      = round(beta_h - ow_beta, 2)
   )
+
 print(fig1_table, n = 13)

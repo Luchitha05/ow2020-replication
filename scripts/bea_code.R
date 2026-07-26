@@ -1,31 +1,57 @@
-library(readxl)
-library(tidyverse)
-library(lubridate)
-library(zoo)
-library(haven)
-library(readr)
+# ============================================================
+# Ottonello & Winberry (2020, Econometrica)
+# "Financial Heterogeneity and the Investment Channel of Monetary Policy"
+#
+# Constructs industry-by-quarter depreciation rates from BEA fixed
+# asset tables (net stock and depreciation), by 2-digit NAICS code
+#
+# Inputs:
+#   data_raw/BEA_Netstock.xlsx (sheet "Datasets")
+#   data_raw/BEA_Dep.xlsx      (sheet "Datasets")
+# Outputs:
+#   data_constructed/bea_fixed_assets_depreciation_data.csv
+# ============================================================
 
-bea_stock <- read_excel(
-  "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_raw/BEA_Netstock.xlsx",
-  sheet = "Datasets"
-)
+library(tidyverse)  # dplyr, tidyr, stringr
+library(readxl)      # read_excel
+library(zoo)         # as.yearqtr
 
-bea_dep <- read_excel(
-  "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_raw/BEA_Dep.xlsx",
-  sheet = "Datasets"
-)
-#Renaming
-stock_raw<- bea_stock %>% rename(series_code = 1)
-dep_raw  <- bea_dep  %>% rename(series_code = 1)
+# ---- Paths ----
+dir_root        <- "."
+dir_raw         <- file.path(dir_root, "data_raw")
+dir_constructed <- file.path(dir_root, "data_constructed")
 
-#Getting only TOTAL EQUIPMENT, TOTAL STRUCTURES, TOTAL INTELLECTUAL
+# raw inputs
+file_bea_stock <- file.path(dir_raw, "BEA_Netstock.xlsx")
+file_bea_dep   <- file.path(dir_raw, "BEA_Dep.xlsx")
+
+# outputs
+file_bea_quarterly <- file.path(dir_constructed, "bea_fixed_assets_depreciation_data.csv")
+
+
+# ============================================================
+# I  Load raw BEA tables
+# ============================================================
+bea_stock <- read_excel(file_bea_stock, sheet = "Datasets")
+bea_dep   <- read_excel(file_bea_dep, sheet = "Datasets")
+
+
+# First column holds the BEA series code but is unnamed on import
+stock_raw <- bea_stock %>% rename(series_code = 1)
+dep_raw   <- bea_dep %>% rename(series_code = 1)
+
+# ============================================================
+# II  Keep total equipment, structures, and intellectual property
+# ============================================================
 stock_totals <- stock_raw %>%
   filter(str_detect(series_code, "EQ00|ST00|IP00"))
 
 dep_totals <- dep_raw %>%
   filter(str_detect(series_code, "EQ00|ST00|IP00"))
 
-#Now we pivot
+# ============================================================
+# III  Reshape to long (one row per series-year)
+# ============================================================
 stock_long <- stock_totals %>%
   pivot_longer(
     cols = matches("^\\d{4}$"),
@@ -42,7 +68,9 @@ dep_long <- dep_totals %>%
   ) %>%
   mutate(year = as.integer(year))
 
-#Next we need to extract the code from the names
+# ============================================================
+# IV  Extract BEA industry code and asset type from series code
+# ============================================================
 stock_long <- stock_long %>%
   mutate(
     bea_code = str_match(series_code, "K1N(.+?)1(EQ00|ST00|IP00)\\.A")[, 2],
@@ -54,7 +82,9 @@ dep_long <- dep_long %>%
     bea_code = str_match(series_code, "M1N(.+?)1(EQ00|ST00|IP00)\\.A")[, 2],
     asset_type = str_match(series_code, "M1N(.+?)1(EQ00|ST00|IP00)\\.A")[, 3]
   )
-#Merging these two
+# ============================================================
+# V  Merge stock and depreciation series
+# ============================================================
 bea_long <- stock_long %>%
   select(bea_code, asset_type, year, stock) %>%
   left_join(
@@ -68,7 +98,9 @@ bea_long <- bea_long %>%
     naics_id = as.numeric(str_sub(bea_code, 1, 2))
   )
 
-#Now we aggrigate the groups and calculate depreciation
+# ============================================================
+# VI  Aggregate to NAICS-year and compute annual depreciation rate
+# ============================================================
 bea_annual <- bea_long %>%
   group_by(naics_id, year) %>%
   summarise(
@@ -79,7 +111,10 @@ bea_annual <- bea_long %>%
   mutate(
     delta_ind_ann = depreciation_total / stock_total
   )
-#Using gen delta_ind = 1 - (1-delta_ind_ann)^(1/4) to convert annual to quarterly
+# ============================================================
+# VIII  Convert annual to quarterly depreciation rate
+# ============================================================
+# Stata: gen delta_ind = 1 - (1-delta_ind_ann)^(1/4)
 
 bea_quarterly <- bea_annual %>%
   crossing(quarter = 1:4) %>%
@@ -89,4 +124,4 @@ bea_quarterly <- bea_annual %>%
   ) %>%
   select(naics_id, dateq, delta_ind)
 
-write_csv(bea_quarterly, "~/Desktop/RA 2026/15949_Data_and_Programs_1/Data_replication_package_ecma/data_constructed/bea_fixed_assets_depreciation_data.csv")
+write_csv(bea_quarterly, file_bea_quarterly)
