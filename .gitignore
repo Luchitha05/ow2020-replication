@@ -1,0 +1,7 @@
+raw_data/
+*.RData
+.Rhistory
+.Rproj.user/
+.DS_Store
+output/
+overleaf/
