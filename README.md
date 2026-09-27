@@ -1,6 +1,6 @@
 # Financial Heterogeneity and the Investment Channel of Monetary Policy — R Replication
  
-An R replication of the empirical section of Ottonello, P. and T. Winberry (2020), ["Financial Heterogeneity and the Investment Channel of Monetary Policy,"](https://doi.org/10.3982/ECTA13603) *Econometrica* 88(6), 2473–2502. The authors' original pipeline was written in Stata; this repository translates it to R, documents where results match or diverge from the published paper, and extends the sample through 2026.
+An R replication of the empirical section of Ottonello, P. and T. Winberry (2020), "Financial Heterogeneity and the Investment Channel of Monetary Policy," *Econometrica* 88(6), 2473–2502. The authors' original pipeline was written in Stata; this repository translates it to R, documents where results match or diverge from the published paper, and extends the sample through 2026.
  
 Undergraduate research project conducted under Prof. Alaïs Martin-Baillon.
  
